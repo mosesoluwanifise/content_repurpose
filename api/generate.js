@@ -231,7 +231,7 @@ function buildPrompt(url, tone, activeFormats, transcript) {
 
   return `You are a professional content repurposing expert who specialises in capturing a speaker's authentic voice.
 
-Below is the full transcript of the video. Base ALL content strictly on this transcript - do not invent, assume, or add anything not explicitly present in it. If the transcript lacks enough information for a field, write "[Insufficient transcript content]" for that field value.
+Base ALL content strictly on this transcript. Do not invent or add anything not in it. If a field lacks enough content, write "[Insufficient transcript content]".
 
 <transcript>
 ${transcript}
@@ -239,24 +239,28 @@ ${transcript}
 
 Video URL: ${url}
 
-Before writing, silently analyse the speaker's voice by observing:
-- Their characteristic vocabulary and word choices (do they use simple words or elevated diction? Slang? Scripture references? Rhetorical questions?)
-- Their sentence rhythm and energy (short punchy declarations? Long flowing patterns? Repetition for emphasis?)
-- How they address their audience (direct "you", collective "we", or third-person teaching?)
-- Any recurring phrases, metaphors, or rhetorical devices they lean on
-- The emotional register: passionate, calm, urgent, pastoral, confrontational, encouraging?
+Step 1 — Silently analyse the speaker's voice:
+- Vocabulary: simple or elevated? Scripture? Slang? Rhetorical questions?
+- Rhythm: short punchy lines or long flowing sentences? Repetition for emphasis?
+- Audience address: direct "you", collective "we", or third-person teaching?
+- Recurring phrases, metaphors, rhetorical devices
+- Emotional register: passionate, urgent, pastoral, encouraging, confrontational?
 
-Then apply that voice profile when writing every piece of content below, so that someone familiar with this speaker would immediately recognise the style. The chosen delivery tone is ${toneDesc} — honour both the speaker's voice AND this tone together.
+Step 2 — Write FINAL, publication-ready content that:
+- Mirrors the speaker's voice so intimately that someone familiar with them recognises it instantly
+- Sounds written by a real person — vary sentence length, use contractions naturally (don't, it's, you'll, we've)
+- Is ${toneDesc} in tone
+- Contains zero AI clichés: no "delve", "game-changer", "leverage", "cutting-edge", "crucial", "groundbreaking", "unleash", "elevate", "foster", "it's important to note", "in conclusion"
+- Uses active voice; reads aloud naturally${blogOn ? "\n- Blog: editorial standalone style, not social media" : ''}${longformOn ? "\n- Long-form: flowing Facebook prose, no markdown headers, blank lines between sections" : ''}
 
 Tasks:
-1. Identify the single most important key message of this video as one clear, complete sentence.
-2. Generate only the content formats listed below, each grounded in and reinforcing that key message.
-3. Mirror the speaker's authentic voice and vocabulary throughout every field.${blogOn ? "\n4. For the blog post: write in an editorial standalone style that still carries the speaker's voice — not social media hype." : ''}${longformOn ? "\n4. For the long-form post: write for Facebook specifically — flowing prose, personal and direct, no markdown headers. Use blank lines between sections." : ''}
+1. Identify the single most important key message as one clear sentence.
+2. Generate only the requested content formats, each reinforcing that key message.
 
-Return ONLY a valid JSON object. No markdown code fences, no preamble, no explanation:
+Return ONLY a valid JSON object. No markdown fences, no preamble:
 
 {
-  "keyMessage": "The video single most important insight as one complete sentence.",
+  "keyMessage": "The video's single most important insight as one complete sentence.",
   ${fields}
 }`
 }
@@ -269,55 +273,7 @@ function extractJson(raw) {
   return JSON.parse(text.trim())
 }
 
-// --- Humanizer ---
-
-async function humanizeContent(generated, transcriptExcerpt) {
-  const fieldsToHumanize = Object.entries(generated).filter(([k]) => k !== 'keyMessage')
-  if (fieldsToHumanize.length === 0) return generated
-
-  const inputJson = JSON.stringify(Object.fromEntries(fieldsToHumanize), null, 2)
-
-  const voiceContext = transcriptExcerpt
-    ? `\n\nSPEAKER VOICE REFERENCE — use this excerpt from the original transcript to calibrate the speaker's vocabulary, rhythm, and rhetorical patterns. Mirror those patterns in your rewrite:\n<voice_sample>\n${transcriptExcerpt}\n</voice_sample>`
-    : ''
-
-  const prompt = `You are a professional editor who makes AI-generated content sound like it was written by the speaker themselves.${voiceContext}
-
-Rewrite every field in the JSON below so the text:
-- Sounds like it came directly from this speaker's mouth or pen — use their vocabulary, rhythm, and rhetorical style
-- Varies sentence length naturally - mix short punchy sentences with longer flowing ones
-- Removes AI cliches: "delve", "it's important to note", "in conclusion", "game-changer", "leverage", "cutting-edge", "crucial", "elevate", "foster", "groundbreaking", "unleash"
-- Uses contractions naturally where the speaker would (don't, it's, you'll, we've, that's)
-- Has natural rhythm - reads aloud comfortably in the speaker's voice
-- Avoids passive voice where active is more direct
-
-Strict rules - do NOT break these:
-- Preserve every YouTube URL exactly as written
-- Preserve all emoji characters in their original positions
-- Preserve all ## heading markers in the blog field
-- Preserve all newlines in the blog field
-- Do NOT change meaning, add new facts, or remove any key information
-- Keep roughly the same length for each field
-
-Input JSON:
-${inputJson}
-
-Return ONLY a valid JSON object with the exact same field names, with humanized values. No markdown fences, no explanation.`
-
-  const message = await anthropic.messages.create({
-    model: 'claude-haiku-4-5',
-    max_tokens: 4096,
-    messages: [{ role: 'user', content: prompt }],
-  })
-  const raw = message.content[0]?.text ?? ''
-  try {
-    const humanized = extractJson(raw)
-    return { ...generated, ...humanized }
-  } catch {
-    console.warn('[Humanizer] Could not parse humanized output - returning original')
-    return generated
-  }
-}
+// --- Humanizer removed: voice + humanization now built into the generation prompt ---
 
 // --- Vercel Serverless Handler ---
 
@@ -349,19 +305,14 @@ export default async function handler(req, res) {
     })
     const raw = response.content[0]?.text ?? ''
 
-    let generated
+    let result
     try {
-      generated = extractJson(raw)
+      result = extractJson(raw)
     } catch {
       throw new Error('Unexpected response format from model.')
     }
 
-    const voiceSample = transcript.length > 1500
-      ? transcript.slice(Math.floor(transcript.length / 4), Math.floor(transcript.length / 4) + 1500)
-      : transcript
-    const humanized = await humanizeContent(generated, voiceSample)
-
-    res.json(humanized)
+    res.json(result)
   } catch (err) {
     const message = err?.message ?? String(err)
     console.error('[API Error]', message)

@@ -187,7 +187,17 @@ export default function App() {
         body: JSON.stringify({ url: url.trim(), tone, activeFormats: activeKeys }),
       })
 
-      const data = await response.json()
+      let data
+      const text = await response.text()
+      try {
+        data = JSON.parse(text)
+      } catch {
+        throw new Error(response.status === 504 || response.status === 502
+          ? 'The request timed out. Try selecting fewer formats or a shorter video.'
+          : `Server error (${response.status}). Please try again.`
+        )
+      }
+
       if (data.transcriptMissing) {
         setTranscriptMissing(true)
         return
@@ -203,10 +213,7 @@ export default function App() {
   }
 
   // ── Loading message ──────────────────────────────────────────────────────────
-  const loadingMessage =
-    (!blogOn && !longformOn)    ? 'Generating & humanizing posts…' :
-    activeKeys.length === 1     ? 'Generating & humanizing…' :
-                                  'Generating & humanizing posts and articles…'
+  const loadingMessage = 'Generating posts… this may take a few seconds.'
 
   // ─── Render ──────────────────────────────────────────────────────────────────
   return (
