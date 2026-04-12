@@ -1,7 +1,58 @@
 import Anthropic from '@anthropic-ai/sdk'
-import { YoutubeTranscript } from 'youtube-transcript/dist/youtube-transcript.esm.js'
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+
+// --- Transcript fetcher (direct fetch — no npm package needed) ---
+
+function extractVideoId(url) {
+  const match = url.match(/(?:v=|youtu\.be\/|shorts\/)([a-zA-Z0-9_-]{11})/)
+  return match ? match[1] : null
+}
+
+async function fetchTranscript(url) {
+  const videoId = extractVideoId(url)
+  if (!videoId) return null
+
+  try {
+    const pageRes = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+      },
+    })
+    const html = await pageRes.text()
+
+    // Extract captionTracks from the embedded player response
+    const captionMatch = html.match(/"captionTracks":\s*(\[[\s\S]*?\])/)
+    if (!captionMatch) return null
+
+    const tracks = JSON.parse(captionMatch[1])
+    const track =
+      tracks.find(t => t.languageCode === 'en') ||
+      tracks.find(t => t.languageCode?.startsWith('en')) ||
+      tracks[0]
+
+    if (!track?.baseUrl) return null
+
+    const xmlRes = await fetch(track.baseUrl)
+    const xml = await xmlRes.text()
+
+    const text = xml
+      .replace(/<[^>]+>/g, ' ')
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&#39;/g, "'")
+      .replace(/&quot;/g, '"')
+      .replace(/\s+/g, ' ')
+      .trim()
+
+    return text.length > 12000 ? text.slice(0, 12000) + '...' : text
+  } catch {
+    return null
+  }
+}
 
 // --- Validation ---
 
@@ -15,18 +66,6 @@ function validateInput(url, tone, activeFormats) {
   if (!Array.isArray(activeFormats) || activeFormats.length === 0) return 'At least one format must be selected.'
   if (!activeFormats.every(f => VALID_FORMATS.has(f))) return 'Invalid format.'
   return null
-}
-
-// --- Transcript fetcher ---
-
-async function fetchTranscript(url) {
-  try {
-    const segments = await YoutubeTranscript.fetchTranscript(url)
-    const text = segments.map(s => s.text).join(' ').replace(/\s+/g, ' ').trim()
-    return text.length > 12000 ? text.slice(0, 12000) + '...' : text
-  } catch {
-    return null
-  }
 }
 
 // --- Prompt builder ---
