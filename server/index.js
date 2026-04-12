@@ -39,49 +39,68 @@ function pickTrack(tracks) {
   )
 }
 
-async function fetchTranscript(url) {
-  const videoId = extractVideoId(url)
-  if (!videoId) return null
+// InnerTube API key (public, used by YouTube's own web client)
+const INNERTUBE_KEY = 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8'
 
-  // --- Method 1: YouTube InnerTube API (most reliable from serverless/cloud IPs) ---
-  try {
-    const playerRes = await fetch('https://www.youtube.com/youtubei/v1/player', {
+async function innerTubePlayer(videoId, clientName, clientVersion, extraContext = {}) {
+  const res = await fetch(
+    `https://www.youtube.com/youtubei/v1/player?key=${INNERTUBE_KEY}&prettyPrint=false`,
+    {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-YouTube-Client-Name': '1',
-        'X-YouTube-Client-Version': '2.20240101.00.00',
-        'Origin': 'https://www.youtube.com',
-        'Referer': `https://www.youtube.com/watch?v=${videoId}`,
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Accept-Language': 'en-US,en;q=0.9',
-      },
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         videoId,
         context: {
           client: {
-            clientName: 'WEB',
-            clientVersion: '2.20240101.00.00',
+            clientName,
+            clientVersion,
             hl: 'en',
             gl: 'US',
+            ...extraContext,
           },
         },
       }),
-    })
-    const player = await playerRes.json()
-    const tracks = player?.captions?.playerCaptionsTracklistRenderer?.captionTracks
-    if (tracks?.length) {
-      const track = pickTrack(tracks)
-      if (track?.baseUrl) {
-        const xmlRes = await fetch(track.baseUrl)
-        const xml = await xmlRes.text()
-        const text = parseXmlCaptions(xml)
-        if (text.length > 50) return text.length > 12000 ? text.slice(0, 12000) + '...' : text
-      }
     }
-  } catch {}
+  )
+  if (!res.ok) return null
+  return res.json()
+}
 
-  // --- Method 2: Page HTML scrape with bracket-counting JSON extraction (fallback) ---
+async function fetchTranscript(url) {
+  const videoId = extractVideoId(url)
+  if (!videoId) return null
+
+  const clients = [
+    // ANDROID client — bypasses bot detection best from cloud IPs
+    () => innerTubePlayer(videoId, 'ANDROID', '19.09.37', {
+      androidSdkVersion: 30,
+      userAgent: 'com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip',
+    }),
+    // IOS client — second most permissive
+    () => innerTubePlayer(videoId, 'IOS', '19.09.3', {
+      userAgent: 'com.google.ios.youtube/19.09.3 (iPhone16,2; U; CPU iOS 17_1_2 like Mac OS X)',
+      deviceMake: 'Apple',
+      deviceModel: 'iPhone16,2',
+    }),
+    // WEB client — fallback
+    () => innerTubePlayer(videoId, 'WEB', '2.20240101.00.00'),
+  ]
+
+  for (const callClient of clients) {
+    try {
+      const player = await callClient()
+      const tracks = player?.captions?.playerCaptionsTracklistRenderer?.captionTracks
+      if (!tracks?.length) continue
+      const track = pickTrack(tracks)
+      if (!track?.baseUrl) continue
+      const xmlRes = await fetch(track.baseUrl)
+      const xml = await xmlRes.text()
+      const text = parseXmlCaptions(xml)
+      if (text.length > 50) return text.length > 12000 ? text.slice(0, 12000) + '...' : text
+    } catch {}
+  }
+
+  // Final fallback: page HTML scrape
   try {
     const pageRes = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
       headers: {
