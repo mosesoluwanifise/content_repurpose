@@ -2,56 +2,106 @@ import Anthropic from '@anthropic-ai/sdk'
 
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 
-// --- Transcript fetcher (direct fetch — no npm package needed) ---
+// --- Transcript fetcher ---
 
 function extractVideoId(url) {
   const match = url.match(/(?:v=|youtu\.be\/|shorts\/)([a-zA-Z0-9_-]{11})/)
   return match ? match[1] : null
 }
 
+function parseXmlCaptions(xml) {
+  return xml
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&#39;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function pickTrack(tracks) {
+  return (
+    tracks.find(t => t.languageCode === 'en' && !t.kind) ||
+    tracks.find(t => t.languageCode === 'en') ||
+    tracks.find(t => t.languageCode?.startsWith('en')) ||
+    tracks[0]
+  )
+}
+
 async function fetchTranscript(url) {
   const videoId = extractVideoId(url)
   if (!videoId) return null
 
+  // --- Method 1: YouTube InnerTube API (most reliable from serverless/cloud IPs) ---
+  try {
+    const playerRes = await fetch('https://www.youtube.com/youtubei/v1/player', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-YouTube-Client-Name': '1',
+        'X-YouTube-Client-Version': '2.20240101.00.00',
+        'Origin': 'https://www.youtube.com',
+        'Referer': `https://www.youtube.com/watch?v=${videoId}`,
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+      body: JSON.stringify({
+        videoId,
+        context: {
+          client: {
+            clientName: 'WEB',
+            clientVersion: '2.20240101.00.00',
+            hl: 'en',
+            gl: 'US',
+          },
+        },
+      }),
+    })
+    const player = await playerRes.json()
+    const tracks = player?.captions?.playerCaptionsTracklistRenderer?.captionTracks
+    if (tracks?.length) {
+      const track = pickTrack(tracks)
+      if (track?.baseUrl) {
+        const xmlRes = await fetch(track.baseUrl)
+        const xml = await xmlRes.text()
+        const text = parseXmlCaptions(xml)
+        if (text.length > 50) return text.length > 12000 ? text.slice(0, 12000) + '...' : text
+      }
+    }
+  } catch {}
+
+  // --- Method 2: Page HTML scrape with bracket-counting JSON extraction (fallback) ---
   try {
     const pageRes = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
       headers: {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
         'Accept-Language': 'en-US,en;q=0.9',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Cookie': 'CONSENT=YES+cb; SOCS=CAI',
       },
     })
     const html = await pageRes.text()
+    const marker = '"captionTracks":'
+    const idx = html.indexOf(marker)
+    if (idx !== -1) {
+      let depth = 0, start = idx + marker.length, i = start
+      for (; i < html.length && i < start + 50000; i++) {
+        if (html[i] === '[') depth++
+        else if (html[i] === ']') { depth--; if (depth === 0) break }
+      }
+      const tracks = JSON.parse(html.slice(start, i + 1))
+      const track = pickTrack(tracks)
+      if (track?.baseUrl) {
+        const xmlRes = await fetch(track.baseUrl)
+        const xml = await xmlRes.text()
+        const text = parseXmlCaptions(xml)
+        if (text.length > 50) return text.length > 12000 ? text.slice(0, 12000) + '...' : text
+      }
+    }
+  } catch {}
 
-    // Extract captionTracks from the embedded player response
-    const captionMatch = html.match(/"captionTracks":\s*(\[[\s\S]*?\])/)
-    if (!captionMatch) return null
-
-    const tracks = JSON.parse(captionMatch[1])
-    const track =
-      tracks.find(t => t.languageCode === 'en') ||
-      tracks.find(t => t.languageCode?.startsWith('en')) ||
-      tracks[0]
-
-    if (!track?.baseUrl) return null
-
-    const xmlRes = await fetch(track.baseUrl)
-    const xml = await xmlRes.text()
-
-    const text = xml
-      .replace(/<[^>]+>/g, ' ')
-      .replace(/&amp;/g, '&')
-      .replace(/&lt;/g, '<')
-      .replace(/&gt;/g, '>')
-      .replace(/&#39;/g, "'")
-      .replace(/&quot;/g, '"')
-      .replace(/\s+/g, ' ')
-      .trim()
-
-    return text.length > 12000 ? text.slice(0, 12000) + '...' : text
-  } catch {
-    return null
-  }
+  return null
 }
 
 // --- Validation ---
