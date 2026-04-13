@@ -255,6 +255,11 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' })
   }
 
+  if (!process.env.ANTHROPIC_API_KEY) {
+    console.error('ANTHROPIC_API_KEY not set')
+    return res.status(500).json({ error: 'Server configuration error' })
+  }
+
   const { url, tone, activeFormats } = req.body
 
   const validationError = validateInput(url, tone, activeFormats)
@@ -272,7 +277,7 @@ export default async function handler(req, res) {
     }
 
     const response = await anthropic.messages.create({
-      model: 'claude-3-5-haiku-20241022',
+      model: 'claude-haiku-4-5-20251001',
       max_tokens: 4096,
       messages: [{ role: 'user', content: buildPrompt(url.trim(), tone, activeFormats, transcript) }],
     })
