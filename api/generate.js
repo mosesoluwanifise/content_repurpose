@@ -72,120 +72,102 @@ function cap(text) {
   return text.length > 12000 ? text.slice(0, 12000) + '...' : text
 }
 
+// Wraps a fetch attempt with a per-request AbortController timeout
+function withTimeout(fetchPromise, ms = 5000) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), ms)
+  return fetchPromise(controller.signal).finally(() => clearTimeout(timer))
+}
+
+async function tryTimedtext(videoId, signal) {
+  for (const lang of ['en', 'en-US']) {
+    try {
+      const r = await fetch(
+        `https://www.youtube.com/api/timedtext?v=${videoId}&lang=${lang}&fmt=json3`,
+        { signal, headers: { 'Accept-Language': 'en-US,en;q=0.9' } }
+      )
+      if (!r.ok) continue
+      const j = await r.json()
+      const text = parseJson3Captions(j)
+      if (text.length > 50) return text
+    } catch {}
+  }
+  return null
+}
+
+async function tryInnerTube(videoId, signal) {
+  const r = await fetch('https://www.youtube.com/youtubei/v1/player', {
+    method: 'POST',
+    signal,
+    headers: {
+      'Content-Type': 'application/json',
+      'User-Agent': 'com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip',
+      'X-YouTube-Client-Name': '3',
+      'X-YouTube-Client-Version': '19.09.37',
+    },
+    body: JSON.stringify({
+      videoId,
+      context: {
+        client: { clientName: 'ANDROID', clientVersion: '19.09.37', androidSdkVersion: 30, hl: 'en', gl: 'US' },
+      },
+    }),
+  })
+  const player = await r.json()
+  const tracks = player?.captions?.playerCaptionsTracklistRenderer?.captionTracks
+  if (!tracks?.length) return null
+  const track = pickTrack(tracks)
+  if (!track?.baseUrl) return null
+  const xmlRes = await fetch(track.baseUrl, { signal })
+  const xml = await xmlRes.text()
+  const text = parseXmlCaptions(xml)
+  return text.length > 50 ? text : null
+}
+
+async function tryTVHTML5(videoId, signal) {
+  const r = await fetch('https://www.youtube.com/youtubei/v1/player', {
+    method: 'POST',
+    signal,
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      videoId,
+      context: {
+        client: { clientName: 'TVHTML5_SIMPLY_EMBEDDED_PLAYER', clientVersion: '2.0', hl: 'en', gl: 'US' },
+        thirdParty: { embedUrl: 'https://www.youtube.com/' },
+      },
+    }),
+  })
+  const player = await r.json()
+  const tracks = player?.captions?.playerCaptionsTracklistRenderer?.captionTracks
+  if (!tracks?.length) return null
+  const track = pickTrack(tracks)
+  if (!track?.baseUrl) return null
+  const xmlRes = await fetch(track.baseUrl + '&fmt=json3', { signal })
+  const j = await xmlRes.json()
+  const text = parseJson3Captions(j)
+  return text.length > 50 ? text : null
+}
+
 async function fetchTranscript(url) {
   const videoId = extractVideoId(url)
   if (!videoId) return null
 
-  // Method 1: Direct /api/timedtext endpoint (oldest YT API, least restricted)
-  try {
-    for (const lang of ['en', 'en-US', 'en-GB']) {
-      const r = await fetch(
-        `https://www.youtube.com/api/timedtext?v=${videoId}&lang=${lang}&fmt=json3`,
-        { headers: { 'Accept-Language': 'en-US,en;q=0.9' } }
-      )
-      if (r.ok) {
-        const j = await r.json()
-        const text = parseJson3Captions(j)
-        if (text.length > 50) { console.log('[Transcript] Method 1 (timedtext) success'); return cap(text) }
-      }
-    }
-    console.log('[Transcript] Method 1 (timedtext) — no usable captions')
-  } catch (e) { console.log('[Transcript] Method 1 error:', e.message) }
+  // Run all methods in parallel — 5s timeout each — take the first non-null success
+  const attempt = (fn) =>
+    withTimeout(fn, 5000)
+      .then(v => { if (!v) throw new Error('empty'); return v })
 
-  // Method 2: InnerTube with TVHTML5_SIMPLY_EMBEDDED_PLAYER (server/embed-friendly client)
   try {
-    const r = await fetch('https://www.youtube.com/youtubei/v1/player', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        videoId,
-        context: {
-          client: { clientName: 'TVHTML5_SIMPLY_EMBEDDED_PLAYER', clientVersion: '2.0', hl: 'en', gl: 'US' },
-          thirdParty: { embedUrl: 'https://www.youtube.com/' },
-        },
-      }),
-    })
-    const player = await r.json()
-    const tracks = player?.captions?.playerCaptionsTracklistRenderer?.captionTracks
-    if (tracks?.length) {
-      const track = pickTrack(tracks)
-      if (track?.baseUrl) {
-        const xmlRes = await fetch(track.baseUrl + '&fmt=json3')
-        const j = await xmlRes.json()
-        const text = parseJson3Captions(j)
-        if (text.length > 50) { console.log('[Transcript] Method 2 (TVHTML5) success'); return cap(text) }
-      }
-    }
-    console.log('[Transcript] Method 2 (TVHTML5) — tracks:', tracks?.length ?? 0)
-  } catch (e) { console.log('[Transcript] Method 2 error:', e.message) }
-
-  // Method 3: InnerTube ANDROID client
-  try {
-    const r = await fetch('https://www.youtube.com/youtubei/v1/player', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'User-Agent': 'com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip',
-        'X-YouTube-Client-Name': '3',
-        'X-YouTube-Client-Version': '19.09.37',
-      },
-      body: JSON.stringify({
-        videoId,
-        context: {
-          client: {
-            clientName: 'ANDROID', clientVersion: '19.09.37',
-            androidSdkVersion: 30, hl: 'en', gl: 'US',
-          },
-        },
-      }),
-    })
-    const player = await r.json()
-    const tracks = player?.captions?.playerCaptionsTracklistRenderer?.captionTracks
-    if (tracks?.length) {
-      const track = pickTrack(tracks)
-      if (track?.baseUrl) {
-        const xmlRes = await fetch(track.baseUrl)
-        const xml = await xmlRes.text()
-        const text = parseXmlCaptions(xml)
-        if (text.length > 50) { console.log('[Transcript] Method 3 (ANDROID) success'); return cap(text) }
-      }
-    }
-    console.log('[Transcript] Method 3 (ANDROID) — tracks:', tracks?.length ?? 0)
-  } catch (e) { console.log('[Transcript] Method 3 error:', e.message) }
-
-  // Method 4: Page HTML scrape — final fallback
-  try {
-    const pageRes = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Cookie': 'CONSENT=YES+cb; SOCS=CAI',
-      },
-    })
-    const html = await pageRes.text()
-    const marker = '"captionTracks":'
-    const idx = html.indexOf(marker)
-    if (idx !== -1) {
-      let depth = 0, start = idx + marker.length, i = start
-      for (; i < html.length && i < start + 50000; i++) {
-        if (html[i] === '[') depth++
-        else if (html[i] === ']') { depth--; if (depth === 0) break }
-      }
-      const tracks = JSON.parse(html.slice(start, i + 1))
-      const track = pickTrack(tracks)
-      if (track?.baseUrl) {
-        const xmlRes = await fetch(track.baseUrl)
-        const xml = await xmlRes.text()
-        const text = parseXmlCaptions(xml)
-        if (text.length > 50) { console.log('[Transcript] Method 4 (page scrape) success'); return cap(text) }
-      }
-    } else {
-      console.log('[Transcript] Method 4 (page scrape) — captionTracks not found in HTML. Page length:', html.length)
-    }
-  } catch (e) { console.log('[Transcript] Method 4 error:', e.message) }
-
-  console.log('[Transcript] All methods failed for videoId:', videoId)
-  return null
+    const text = await Promise.any([
+      attempt(sig => tryTimedtext(videoId, sig)),
+      attempt(sig => tryInnerTube(videoId, sig)),
+      attempt(sig => tryTVHTML5(videoId, sig)),
+    ])
+    console.log('[Transcript] Parallel fetch succeeded')
+    return cap(text)
+  } catch {
+    console.log('[Transcript] All parallel methods failed for', videoId)
+    return null
+  }
 }
 
 // --- Validation ---
