@@ -59,15 +59,6 @@ function parseJson3Captions(json3) {
     .trim()
 }
 
-function pickTrack(tracks) {
-  return (
-    tracks.find(t => t.languageCode === 'en' && !t.kind) ||
-    tracks.find(t => t.languageCode === 'en') ||
-    tracks.find(t => t.languageCode?.startsWith('en')) ||
-    tracks[0]
-  )
-}
-
 function cap(text) {
   return text.length > 12000 ? text.slice(0, 12000) + '...' : text
 }
@@ -281,7 +272,7 @@ export default async function handler(req, res) {
     }
 
     const response = await anthropic.messages.create({
-      model: 'claude-haiku-4-5',
+      model: 'claude-3-5-haiku-20241022',
       max_tokens: 4096,
       messages: [{ role: 'user', content: buildPrompt(url.trim(), tone, activeFormats, transcript) }],
     })
