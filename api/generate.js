@@ -268,10 +268,71 @@ Return ONLY a valid JSON object. No markdown fences, no preamble:
 
 // --- JSON extractor (strips markdown fences if model wraps output) ---
 
+function findFirstJsonObjectSlice(input) {
+  const start = input.indexOf('{')
+  if (start === -1) return null
+
+  let depth = 0
+  let inString = false
+  let escape = false
+
+  for (let i = start; i < input.length; i++) {
+    const ch = input[i]
+
+    if (inString) {
+      if (escape) {
+        escape = false
+      } else if (ch === '\\') {
+        escape = true
+      } else if (ch === '"') {
+        inString = false
+      }
+      continue
+    }
+
+    if (ch === '"') {
+      inString = true
+      continue
+    }
+
+    if (ch === '{') depth++
+    if (ch === '}') {
+      depth--
+      if (depth === 0) return input.slice(start, i + 1)
+    }
+  }
+
+  return null
+}
+
 function extractJson(raw) {
-  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/)
-  const text = fenced ? fenced[1] : raw
-  return JSON.parse(text.trim())
+  const text = String(raw ?? '').trim()
+  const fenced = text.match(/```(?:json)?\s*([\s\S]*?)```/i)
+  const sliced = findFirstJsonObjectSlice(text)
+  const candidates = [fenced?.[1], text, sliced].filter(Boolean)
+
+  for (const candidate of candidates) {
+    try {
+      return JSON.parse(candidate.trim())
+    } catch {}
+  }
+
+  throw new Error('Model did not return valid JSON.')
+}
+
+function validateGeneratedPayload(payload, activeFormats) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+    return 'Generated payload is not a JSON object.'
+  }
+
+  const required = ['keyMessage', ...activeFormats]
+  for (const key of required) {
+    if (typeof payload[key] !== 'string' || payload[key].trim().length === 0) {
+      return `Missing or invalid field: ${key}`
+    }
+  }
+
+  return null
 }
 
 // --- Humanizer removed: voice + humanization now built into the generation prompt ---
@@ -304,10 +365,12 @@ export default async function handler(req, res) {
       })
     }
 
+    const generationPrompt = buildPrompt(url.trim(), tone, activeFormats, transcript)
+
     const response = await anthropic.messages.create({
       model: 'claude-haiku-4-5-20251001',
       max_tokens: 4096,
-      messages: [{ role: 'user', content: buildPrompt(url.trim(), tone, activeFormats, transcript) }],
+      messages: [{ role: 'user', content: generationPrompt }],
     })
     const raw = response.content[0]?.text ?? ''
 
@@ -315,7 +378,21 @@ export default async function handler(req, res) {
     try {
       result = extractJson(raw)
     } catch {
-      throw new Error('Unexpected response format from model.')
+      const retry = await anthropic.messages.create({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 4096,
+        messages: [{
+          role: 'user',
+          content: `${generationPrompt}\n\nIMPORTANT: Return only valid JSON. No prose, no XML, no markdown fences.`,
+        }],
+      })
+      const retryRaw = retry.content[0]?.text ?? ''
+      result = extractJson(retryRaw)
+    }
+
+    const payloadError = validateGeneratedPayload(result, activeFormats)
+    if (payloadError) {
+      throw new Error(`Invalid model JSON payload: ${payloadError}`)
     }
 
     res.json(result)
@@ -323,7 +400,7 @@ export default async function handler(req, res) {
     const message = err?.message ?? String(err)
     console.error('[API Error]', message)
     const safeMessage = /unexpected token\s*['"]?</i.test(message) || /not valid json/i.test(message)
-      ? 'Could not parse upstream transcript data. Please retry or try a different video.'
+      ? 'Model output was malformed. The system retried automatically but could not recover. Please retry.'
       : message
     res.status(500).json({ error: safeMessage })
   }
