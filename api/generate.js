@@ -59,6 +59,14 @@ function parseJson3Captions(json3) {
     .trim()
 }
 
+function tryParseJson(text) {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return null
+  }
+}
+
 function cap(text) {
   return text.length > 12000 ? text.slice(0, 12000) + '...' : text
 }
@@ -78,7 +86,9 @@ async function tryTimedtext(videoId, signal) {
         { signal, headers: { 'Accept-Language': 'en-US,en;q=0.9' } }
       )
       if (!r.ok) continue
-      const j = await r.json()
+      const raw = await r.text()
+      const j = tryParseJson(raw)
+      if (!j) continue
       const text = parseJson3Captions(j)
       if (text.length > 50) return text
     } catch {}
@@ -87,55 +97,73 @@ async function tryTimedtext(videoId, signal) {
 }
 
 async function tryInnerTube(videoId, signal) {
-  const r = await fetch('https://www.youtube.com/youtubei/v1/player', {
-    method: 'POST',
-    signal,
-    headers: {
-      'Content-Type': 'application/json',
-      'User-Agent': 'com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip',
-      'X-YouTube-Client-Name': '3',
-      'X-YouTube-Client-Version': '19.09.37',
-    },
-    body: JSON.stringify({
-      videoId,
-      context: {
-        client: { clientName: 'ANDROID', clientVersion: '19.09.37', androidSdkVersion: 30, hl: 'en', gl: 'US' },
+  try {
+    const r = await fetch('https://www.youtube.com/youtubei/v1/player', {
+      method: 'POST',
+      signal,
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': 'com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip',
+        'X-YouTube-Client-Name': '3',
+        'X-YouTube-Client-Version': '19.09.37',
       },
-    }),
-  })
-  const player = await r.json()
-  const tracks = player?.captions?.playerCaptionsTracklistRenderer?.captionTracks
-  if (!tracks?.length) return null
-  const track = pickTrack(tracks)
-  if (!track?.baseUrl) return null
-  const xmlRes = await fetch(track.baseUrl, { signal })
-  const xml = await xmlRes.text()
-  const text = parseXmlCaptions(xml)
-  return text.length > 50 ? text : null
+      body: JSON.stringify({
+        videoId,
+        context: {
+          client: { clientName: 'ANDROID', clientVersion: '19.09.37', androidSdkVersion: 30, hl: 'en', gl: 'US' },
+        },
+      }),
+    })
+    const playerRaw = await r.text()
+    const player = tryParseJson(playerRaw)
+    if (!player) return null
+
+    const tracks = player?.captions?.playerCaptionsTracklistRenderer?.captionTracks
+    if (!tracks?.length) return null
+    const track = pickTrack(tracks)
+    if (!track?.baseUrl) return null
+
+    const xmlRes = await fetch(track.baseUrl, { signal })
+    const xml = await xmlRes.text()
+    const text = parseXmlCaptions(xml)
+    return text.length > 50 ? text : null
+  } catch {
+    return null
+  }
 }
 
 async function tryTVHTML5(videoId, signal) {
-  const r = await fetch('https://www.youtube.com/youtubei/v1/player', {
-    method: 'POST',
-    signal,
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      videoId,
-      context: {
-        client: { clientName: 'TVHTML5_SIMPLY_EMBEDDED_PLAYER', clientVersion: '2.0', hl: 'en', gl: 'US' },
-        thirdParty: { embedUrl: 'https://www.youtube.com/' },
-      },
-    }),
-  })
-  const player = await r.json()
-  const tracks = player?.captions?.playerCaptionsTracklistRenderer?.captionTracks
-  if (!tracks?.length) return null
-  const track = pickTrack(tracks)
-  if (!track?.baseUrl) return null
-  const xmlRes = await fetch(track.baseUrl + '&fmt=json3', { signal })
-  const j = await xmlRes.json()
-  const text = parseJson3Captions(j)
-  return text.length > 50 ? text : null
+  try {
+    const r = await fetch('https://www.youtube.com/youtubei/v1/player', {
+      method: 'POST',
+      signal,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        videoId,
+        context: {
+          client: { clientName: 'TVHTML5_SIMPLY_EMBEDDED_PLAYER', clientVersion: '2.0', hl: 'en', gl: 'US' },
+          thirdParty: { embedUrl: 'https://www.youtube.com/' },
+        },
+      }),
+    })
+    const playerRaw = await r.text()
+    const player = tryParseJson(playerRaw)
+    if (!player) return null
+
+    const tracks = player?.captions?.playerCaptionsTracklistRenderer?.captionTracks
+    if (!tracks?.length) return null
+    const track = pickTrack(tracks)
+    if (!track?.baseUrl) return null
+
+    const captionRes = await fetch(track.baseUrl + '&fmt=json3', { signal })
+    if (!captionRes.ok) return null
+    const raw = await captionRes.text()
+    const json = tryParseJson(raw)
+    const text = json ? parseJson3Captions(json) : parseXmlCaptions(raw)
+    return text.length > 50 ? text : null
+  } catch {
+    return null
+  }
 }
 
 async function fetchTranscript(url) {
@@ -294,6 +322,9 @@ export default async function handler(req, res) {
   } catch (err) {
     const message = err?.message ?? String(err)
     console.error('[API Error]', message)
-    res.status(500).json({ error: message })
+    const safeMessage = /unexpected token\s*['"]?</i.test(message) || /not valid json/i.test(message)
+      ? 'Could not parse upstream transcript data. Please retry or try a different video.'
+      : message
+    res.status(500).json({ error: safeMessage })
   }
 }

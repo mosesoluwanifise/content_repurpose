@@ -68,6 +68,14 @@ function parseJson3Captions(json3) {
     .trim()
 }
 
+function tryParseJson(text) {
+  try {
+    return JSON.parse(text)
+  } catch {
+    return null
+  }
+}
+
 function pickTrack(tracks) {
   return (
     tracks.find(t => t.languageCode === 'en' && !t.kind) ||
@@ -93,7 +101,9 @@ async function fetchTranscript(url) {
         { headers: { 'Accept-Language': 'en-US,en;q=0.9' } }
       )
       if (r.ok) {
-        const j = await r.json()
+        const raw = await r.text()
+        const j = tryParseJson(raw)
+        if (!j) continue
         const text = parseJson3Captions(j)
         if (text.length > 50) { console.log('[Transcript] Method 1 (timedtext) success'); return cap(text) }
       }
@@ -113,14 +123,18 @@ async function fetchTranscript(url) {
         },
       }),
     })
-    const player = await r.json()
+    const playerRaw = await r.text()
+    const player = tryParseJson(playerRaw)
+    if (!player) throw new Error('Invalid TVHTML5 player payload')
     const tracks = player?.captions?.playerCaptionsTracklistRenderer?.captionTracks
     if (tracks?.length) {
       const track = pickTrack(tracks)
       if (track?.baseUrl) {
-        const xmlRes = await fetch(track.baseUrl + '&fmt=json3')
-        const j = await xmlRes.json()
-        const text = parseJson3Captions(j)
+        const captionRes = await fetch(track.baseUrl + '&fmt=json3')
+        if (!captionRes.ok) throw new Error('TVHTML5 caption fetch failed')
+        const raw = await captionRes.text()
+        const j = tryParseJson(raw)
+        const text = j ? parseJson3Captions(j) : parseXmlCaptions(raw)
         if (text.length > 50) { console.log('[Transcript] Method 2 (TVHTML5) success'); return cap(text) }
       }
     }
@@ -146,7 +160,9 @@ async function fetchTranscript(url) {
         },
       }),
     })
-    const player = await r.json()
+    const playerRaw = await r.text()
+    const player = tryParseJson(playerRaw)
+    if (!player) throw new Error('Invalid ANDROID player payload')
     const tracks = player?.captions?.playerCaptionsTracklistRenderer?.captionTracks
     if (tracks?.length) {
       const track = pickTrack(tracks)
@@ -362,7 +378,10 @@ app.post('/api/generate', async (req, res) => {
   } catch (err) {
     const message = err?.message ?? String(err)
     console.error('[API Error]', message)
-    res.status(500).json({ error: message })
+    const safeMessage = /unexpected token\s*['"]?</i.test(message) || /not valid json/i.test(message)
+      ? 'Could not parse upstream transcript data. Please retry or try a different video.'
+      : message
+    res.status(500).json({ error: safeMessage })
   }
 })
 
